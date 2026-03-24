@@ -1,9 +1,7 @@
 name: Fuel Forecast Bot
 
 on:
-  schedule:
-    - cron: '0 2,6,10 * * *'  # 10AM, 2PM, 6PM PHT (UTC+8)
-  workflow_dispatch:           # allow manual trigger
+  workflow_dispatch:  # triggered by cron-job.org
 
 jobs:
   send-forecast:
