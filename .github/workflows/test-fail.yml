@@ -18,8 +18,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run with missing secret
+      - name: Install missing package
+        run: pip install nonexistent-package-xyz-123
+
+      - name: Run script
         run: python main.py
-        env:
-          TELEGRAM_BOT_TOKEN: "invalid_token_12345"
-          TELEGRAM_CHAT_ID: "@FakeChannel"
