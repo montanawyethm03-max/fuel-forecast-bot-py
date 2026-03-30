@@ -43,6 +43,12 @@ def get_direction(val: float) -> str:
 def get_sign(val: float) -> str:
     return "+" if val > 0 else ""
 
+def fuel_range(val: float) -> tuple[float, float]:
+    margin = abs(val) * 0.20
+    low  = max(0.0, round((abs(val) - margin) * 2) / 2)
+    high = round((abs(val) + margin) * 2) / 2
+    return low, high
+
 def next_tuesday(now: datetime) -> str:
     days = (1 - now.weekday() + 7) % 7
     if days == 0: days = 7
@@ -50,18 +56,20 @@ def next_tuesday(now: datetime) -> str:
 
 # ── Data Fetchers ───────────────────────────────────────────────────────
 def get_brent():
-    """Fetch recent Brent crude closes and compute weekly delta."""
+    """Fetch Brent closes and compute weekly avg change (current 5-day avg vs prior 5-day avg)."""
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F?interval=1d&range=5d"
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F?interval=1d&range=15d"
         r = session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
-        if len(closes) >= 2:
-            brent_price = round(closes[-1], 2)
-            brent_change = round(closes[-1] - closes[-2], 2)
-            return brent_price, brent_change
+        if len(closes) >= 10:
+            current_week_avg = sum(closes[-5:]) / 5
+            prev_week_avg    = sum(closes[-10:-5]) / 5
+            weekly_change    = round(current_week_avg - prev_week_avg, 2)
+            return round(closes[-1], 2), weekly_change
+        elif len(closes) >= 2:
+            return round(closes[-1], 2), round(closes[-1] - closes[-2], 2)
     except Exception as e:
         print(f"[WARN] Brent fetch failed: {e}")
-    # fallback to previous known price
     return 75.00, 0.0
 
 def get_usd_php():
@@ -117,40 +125,38 @@ def calculate_forecast(brent_price, brent_change, usd_php):
     raw_estimate = (brent_change / barrel_to_ltr) * usd_php * forex_factor
 
     abs_change = abs(brent_change)
-    dampener = 0.35 if abs_change > 6 else 0.65 if abs_change > 3 else 1.0
+    dampener = 0.75 if abs_change > 15 else 0.90 if abs_change > 5 else 1.0
     est = round(raw_estimate * dampener, 2)
 
-    # realistic min/max ranges for 2-hr updates
-    diesel_min   = max(-20, min(20, round(est * 1.1, 2)))
-    diesel_max   = max(-20, min(20, round(est * 1.3, 2)))
-    gasoline_min = max(-10, min(10, round(est * 0.9, 2)))
-    gasoline_max = max(-10, min(10, round(est * 1.1, 2)))
-    kerosene_min = max(-15, min(15, round(est * 0.95, 2)))
-    kerosene_max = max(-15, min(15, round(est * 1.05, 2)))
+    diesel   = max(-8,  min(8,  round(est * 1.1, 2)))
+    gasoline = max(-6,  min(6,  round(est * 0.9, 2)))
+    kerosene = max(-7,  min(7,  round(est * 1.0, 2)))
 
-    # trend & advice
+    d_low, d_high = fuel_range(diesel)
+    g_low, g_high = fuel_range(gasoline)
+    k_low, k_high = fuel_range(kerosene)
+
     trend = (
-        "Big increase" if est > 6 else
-        "Slight increase" if est > 1 else
-        "Flat / Stable" if -1 <= est <= 1 else
+        "Big increase"    if est > 6  else
+        "Slight increase" if est > 1  else
+        "Flat / Stable"   if -1 <= est <= 1 else
         "Slight rollback" if est > -6 else
         "Big rollback"
     )
 
     advice = (
-        "Gas up now - prices going up" if est > 6 else
-        "Gas up soon - slight increase ahead" if est > 1 else
-        "No rush - prices stable" if -1 <= est <= 1 else
+        "Gas up now - prices going up"        if est > 6  else
+        "Gas up soon - slight increase ahead" if est > 1  else
+        "No rush - prices stable"             if -1 <= est <= 1 else
         "You can wait - rollback expected"
     )
 
     return {
-        "diesel": f"{diesel_min}-{diesel_max}",
-        "gasoline": f"{gasoline_min}-{gasoline_max}",
-        "kerosene": f"{kerosene_min}-{kerosene_max}",
-        "trend": trend,
-        "advice": advice,
-        "est": est
+        "diesel": diesel, "gasoline": gasoline, "kerosene": kerosene,
+        "d_low": d_low, "d_high": d_high,
+        "g_low": g_low, "g_high": g_high,
+        "k_low": k_low, "k_high": k_high,
+        "trend": trend, "advice": advice, "est": est
     }
 
 def get_confidence(weekday):
@@ -158,10 +164,12 @@ def get_confidence(weekday):
 
 # ── Message Builder ─────────────────────────────────────────────────────
 def build_message(now, brent_price, brent_change, usd_php, official, forecast):
-    dir_arrow = "⬆" if official["dir"] == "up" else "⬇"
+    dir_arrow  = "⬆" if official["dir"] == "up" else "⬇"
     confidence = get_confidence(now.weekday())
-    d, g, k = forecast["diesel"], forecast["gasoline"], forecast["kerosene"]
-    peso_dir = "weak" if usd_php > BASELINE_PHP else "strong"
+    peso_dir   = "weak" if usd_php > BASELINE_PHP else "strong"
+    d_label    = "⬆ increase" if forecast["diesel"]   >= 0 else "⬇ rollback"
+    g_label    = "⬆ increase" if forecast["gasoline"]  >= 0 else "⬇ rollback"
+    k_label    = "⬆ increase" if forecast["kerosene"]  >= 0 else "⬇ rollback"
 
     return (
         f"⛽ Borderline Daily Fuel Forecast\n"
@@ -171,13 +179,13 @@ def build_message(now, brent_price, brent_change, usd_php, official, forecast):
         f"Gasoline: {dir_arrow} ₱{official['gasoline']}/L\n"
         f"Kerosene: {dir_arrow} ₱{official['kerosene']}/L\n\n"
         f"📢 Next Week Estimate ({next_tuesday(now)})\n"
-        f"Diesel:   {get_direction(forecast['est'])} ₱{d}/L\n"
-        f"Gasoline: {get_direction(forecast['est'])} ₱{g}/L\n"
-        f"Kerosene: {get_direction(forecast['est'])} ₱{k}/L\n\n"
+        f"Diesel:   ₱{forecast['d_low']:.2f}-₱{forecast['d_high']:.2f}/L {d_label}\n"
+        f"Gasoline: ₱{forecast['g_low']:.2f}-₱{forecast['g_high']:.2f}/L {g_label}\n"
+        f"Kerosene: ₱{forecast['k_low']:.2f}-₱{forecast['k_high']:.2f}/L {k_label}\n\n"
         f"Trend: {forecast['trend']}\n"
         f"Confidence: {confidence}\n"
         f"Advice: {forecast['advice']}\n\n"
-        f"Brent: {get_direction(brent_change)} ${brent_price}/bbl ({abs(brent_change)}/day)\n"
+        f"Brent: {get_direction(brent_change)} ${brent_price}/bbl ({abs(brent_change)}/wk avg)\n"
         f"USD/PHP: {usd_php} | Peso {peso_dir}"
     )
 
