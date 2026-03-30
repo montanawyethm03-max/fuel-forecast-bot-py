@@ -363,13 +363,19 @@ def build_message(now, ho_price, ho_change, rb_price, rb_change,
     k_label    = "⬆ increase" if forecast["kerosene"]  >= 0 else "⬇ rollback"
     day_label  = get_day_label(now)
 
-    return (
-        f"⛽ Borderline Daily Fuel Forecast\n"
-        f"🕓 {now.strftime('%b %d, %Y')} | {now.strftime('%I:%M %p')}\n\n"
+    has_official = float(official["diesel"]) > 0
+
+    official_section = (
         f"Official Adjustment ({official['date']}) | {official['source']}\n"
         f"Diesel:   {dir_arrow} ₱{official['diesel']}/L\n"
         f"Gasoline: {dir_arrow} ₱{official['gasoline']}/L\n"
         f"Kerosene: {dir_arrow} ₱{official['kerosene']}/L\n\n"
+    ) if has_official else ""
+
+    return (
+        f"⛽ Borderline Daily Fuel Forecast\n"
+        f"🕓 {now.strftime('%b %d, %Y')} | {now.strftime('%I:%M %p')}\n\n"
+        f"{official_section}"
         f"📢 {day_label} — Next Adjustment ({next_tuesday_str(now)})\n"
         f"Diesel:   ₱{forecast['d_low']:.1f}-₱{forecast['d_high']:.1f}/L {d_label}\n"
         f"Gasoline: ₱{forecast['g_low']:.1f}-₱{forecast['g_high']:.1f}/L {g_label}\n"
