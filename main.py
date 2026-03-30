@@ -19,7 +19,8 @@ FALLBACK = {
     "diesel":   "0.00",
     "gasoline": "0.00",
     "kerosene": "0.00",
-    "dir":      "up"
+    "dir":      "up",
+    "source":   "fallback"
 }
 
 # ── HTTP Session with Retry ───────────────────────────────────────────────
@@ -165,6 +166,7 @@ def _scrape_gma(result: dict) -> bool:
             if "pump-price" in a["href"] and "gmanetwork.com/news" in a["href"]:
                 r2 = session.get(a["href"], timeout=15, headers={"User-Agent": "Mozilla/5.0"})
                 if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "GMA News"
                     print("[INFO] Official adjustment from GMA News.")
                     return True
     except Exception as e:
@@ -182,6 +184,7 @@ def _scrape_inquirer(result: dict) -> bool:
             if "inquirer.net" in href and re.search(r'fuel|oil|pump|diesel|gasoline', href, re.IGNORECASE):
                 r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
                 if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "Inquirer.net"
                     print("[INFO] Official adjustment from Inquirer.net.")
                     return True
     except Exception as e:
@@ -259,7 +262,7 @@ def build_message(now, ho_price, ho_change, rb_price, rb_change,
     return (
         f"⛽ Borderline Daily Fuel Forecast\n"
         f"🕓 {now.strftime('%b %d, %Y')} | {now.strftime('%I:%M %p')}\n\n"
-        f"Official Adjustment ({official['date']})\n"
+        f"Official Adjustment ({official['date']}) | {official['source']}\n"
         f"Diesel:   {dir_arrow} ₱{official['diesel']}/L\n"
         f"Gasoline: {dir_arrow} ₱{official['gasoline']}/L\n"
         f"Kerosene: {dir_arrow} ₱{official['kerosene']}/L\n\n"
