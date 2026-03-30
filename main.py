@@ -6,13 +6,12 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import random
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "@BorderlineDailyFuelForecast")
 
-BASELINE_PHP = 56.00
+BASELINE_PHP = 56.00  # baseline peso for calculation
 
 FALLBACK = {
     "date":     "Mar 24, 2026",
@@ -22,7 +21,7 @@ FALLBACK = {
     "dir":      "up"
 }
 
-# ── HTTP Session with Retry ────────────────────────────────────────────────────
+# ── HTTP Session with Retry ───────────────────────────────────────────────
 def create_session():
     session = requests.Session()
     retries = Retry(
@@ -37,37 +36,36 @@ def create_session():
 
 session = create_session()
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────
 def get_direction(val: float) -> str:
-    if val > 0: return "⬆"
-    if val < 0: return "⬇"
-    return "➡"
+    return "⬆" if val > 0 else "⬇" if val < 0 else "➡"
 
 def get_sign(val: float) -> str:
     return "+" if val > 0 else ""
 
 def next_tuesday(now: datetime) -> str:
     days = (1 - now.weekday() + 7) % 7
-    if days == 0:
-        days = 7
+    if days == 0: days = 7
     return (now + timedelta(days=days)).strftime("%b %d, %Y")
 
-# ── Data Fetchers ──────────────────────────────────────────────────────────────
+# ── Data Fetchers ───────────────────────────────────────────────────────
 def get_brent():
+    """Fetch recent Brent crude closes and compute weekly delta."""
     try:
-        url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F?interval=1d&range=10d"
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F?interval=1d&range=5d"
         r = session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         closes = [c for c in r.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"] if c]
-        if len(closes) >= 10:
-            this_week_avg = sum(closes[-5:]) / 5
-            last_week_avg = sum(closes[-10:-5]) / 5
-            change = this_week_avg - last_week_avg
-            return round(this_week_avg, 2), round(change, 2)
+        if len(closes) >= 2:
+            brent_price = round(closes[-1], 2)
+            brent_change = round(closes[-1] - closes[-2], 2)
+            return brent_price, brent_change
     except Exception as e:
         print(f"[WARN] Brent fetch failed: {e}")
+    # fallback to previous known price
     return 75.00, 0.0
 
 def get_usd_php():
+    """Fetch USD/PHP exchange rate."""
     try:
         r = session.get("https://open.er-api.com/v6/latest/USD", timeout=15)
         return round(r.json()["rates"]["PHP"], 2)
@@ -76,6 +74,7 @@ def get_usd_php():
     return BASELINE_PHP
 
 def get_official_adjustment():
+    """Scrape official DOE-aligned fuel adjustments from news sources."""
     result = dict(FALLBACK)
     try:
         search_url = "https://www.gmanetwork.com/news/search/?q=pump+prices+tuesday"
@@ -104,51 +103,51 @@ def get_official_adjustment():
             if k: result["kerosene"] = k.group(1)
 
             result["dir"] = "up" if re.search(r'hike|increas|up', html, re.IGNORECASE) else "down"
-
     except Exception as e:
         print(f"[WARN] GMA scrape failed: {e}")
 
     return result
 
-# ── Forecast Calculation with range ─────────────────────────────────────────────
+# ── Forecast Calculation ─────────────────────────────────────────────────
 def calculate_forecast(brent_price, brent_change, usd_php):
-    forex_factor  = usd_php / BASELINE_PHP
+    """Compute realistic local fuel estimate based on Brent + USD/PHP + dampener."""
     barrel_to_ltr = 159
-    raw_estimate  = (brent_change / barrel_to_ltr) * usd_php * forex_factor
+    forex_factor = usd_php / BASELINE_PHP
+
+    raw_estimate = (brent_change / barrel_to_ltr) * usd_php * forex_factor
 
     abs_change = abs(brent_change)
-    dampener = 1.0 if abs_change > 6 else 0.85 if abs_change > 3 else 0.7
+    dampener = 0.35 if abs_change > 6 else 0.65 if abs_change > 3 else 1.0
     est = round(raw_estimate * dampener, 2)
 
-    # Apply scaling and realistic min/max
-    diesel_base   = est * 1.1
-    gasoline_base = est * 0.9
-    kerosene_base = est * 1.0
+    # realistic min/max ranges for 2-hr updates
+    diesel_min   = max(-20, min(20, round(est * 1.1, 2)))
+    diesel_max   = max(-20, min(20, round(est * 1.3, 2)))
+    gasoline_min = max(-10, min(10, round(est * 0.9, 2)))
+    gasoline_max = max(-10, min(10, round(est * 1.1, 2)))
+    kerosene_min = max(-15, min(15, round(est * 0.95, 2)))
+    kerosene_max = max(-15, min(15, round(est * 1.05, 2)))
 
-    # Add ± uncertainty for realistic range
-    diesel_range   = (round(max(1, diesel_base*0.9),2), round(min(14, diesel_base*1.1),2))
-    gasoline_range = (round(max(0.5, gasoline_base*0.7),2), round(min(3, gasoline_base*1.2),2))
-    kerosene_range = (round(max(1, kerosene_base*0.8),2), round(min(5, kerosene_base*1.2),2))
-
+    # trend & advice
     trend = (
-        "Still increasing" if est > 3 else
-        "Slight increase" if est > 0 else
-        "Flat / Stable" if est == 0 else
-        "Slight rollback" if est > -3 else
+        "Big increase" if est > 6 else
+        "Slight increase" if est > 1 else
+        "Flat / Stable" if -1 <= est <= 1 else
+        "Slight rollback" if est > -6 else
         "Big rollback"
     )
 
     advice = (
-        "Gas up now - prices going up" if est > 3 else
-        "Gas up soon - slight increase ahead" if est > 0 else
-        "No rush - prices stable" if est == 0 else
+        "Gas up now - prices going up" if est > 6 else
+        "Gas up soon - slight increase ahead" if est > 1 else
+        "No rush - prices stable" if -1 <= est <= 1 else
         "You can wait - rollback expected"
     )
 
     return {
-        "diesel": diesel_range,
-        "gasoline": gasoline_range,
-        "kerosene": kerosene_range,
+        "diesel": f"{diesel_min}-{diesel_max}",
+        "gasoline": f"{gasoline_min}-{gasoline_max}",
+        "kerosene": f"{kerosene_min}-{kerosene_max}",
         "trend": trend,
         "advice": advice,
         "est": est
@@ -157,13 +156,11 @@ def calculate_forecast(brent_price, brent_change, usd_php):
 def get_confidence(weekday):
     return "High" if weekday >= 4 else "Medium" if weekday >= 2 else "Low"
 
-# ── Message Builder ────────────────────────────────────────────────────────────
+# ── Message Builder ─────────────────────────────────────────────────────
 def build_message(now, brent_price, brent_change, usd_php, official, forecast):
     dir_arrow = "⬆" if official["dir"] == "up" else "⬇"
     confidence = get_confidence(now.weekday())
-    d_min, d_max = forecast["diesel"]
-    g_min, g_max = forecast["gasoline"]
-    k_min, k_max = forecast["kerosene"]
+    d, g, k = forecast["diesel"], forecast["gasoline"], forecast["kerosene"]
     peso_dir = "weak" if usd_php > BASELINE_PHP else "strong"
 
     return (
@@ -174,9 +171,9 @@ def build_message(now, brent_price, brent_change, usd_php, official, forecast):
         f"Gasoline: {dir_arrow} ₱{official['gasoline']}/L\n"
         f"Kerosene: {dir_arrow} ₱{official['kerosene']}/L\n\n"
         f"📢 Next Week Estimate ({next_tuesday(now)})\n"
-        f"Diesel:   {get_direction(d_max)} ₱{d_min}-{d_max}/L\n"
-        f"Gasoline: {get_direction(g_max)} ₱{g_min}-{g_max}/L\n"
-        f"Kerosene: {get_direction(k_max)} ₱{k_min}-{k_max}/L\n\n"
+        f"Diesel:   {get_direction(forecast['est'])} ₱{d}/L\n"
+        f"Gasoline: {get_direction(forecast['est'])} ₱{g}/L\n"
+        f"Kerosene: {get_direction(forecast['est'])} ₱{k}/L\n\n"
         f"Trend: {forecast['trend']}\n"
         f"Confidence: {confidence}\n"
         f"Advice: {forecast['advice']}\n\n"
@@ -184,10 +181,11 @@ def build_message(now, brent_price, brent_change, usd_php, official, forecast):
         f"USD/PHP: {usd_php} | Peso {peso_dir}"
     )
 
-# ── Telegram Sender ────────────────────────────────────────────────────────────
+# ── Telegram Sender ─────────────────────────────────────────────────────
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message}
+
     try:
         r = session.post(url, json=data, timeout=30)
         r.raise_for_status()
@@ -195,19 +193,19 @@ def send_telegram(message):
     except requests.exceptions.RequestException as e:
         print(f"❌ Telegram failed: {e}")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────
 def main():
     now = datetime.now(ZoneInfo("Asia/Manila"))
 
     print("Fetching data...")
     brent_price, brent_change = get_brent()
-    usd_php  = get_usd_php()
+    usd_php = get_usd_php()
     official = get_official_adjustment()
 
     print(f"Brent: ${brent_price} | Change: {brent_change} | USD/PHP: {usd_php}")
 
     forecast = calculate_forecast(brent_price, brent_change, usd_php)
-    message  = build_message(now, brent_price, brent_change, usd_php, official, forecast)
+    message = build_message(now, brent_price, brent_change, usd_php, official, forecast)
 
     print("\n--- MESSAGE PREVIEW ---")
     print(message)
