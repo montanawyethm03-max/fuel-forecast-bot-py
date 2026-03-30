@@ -15,12 +15,12 @@ BASELINE_PHP   = 56.00
 LITERS_PER_GAL = 3.785
 
 FALLBACK = {
-    "date":     "Apr 7, 2026",
+    "date":     "Mar 31, 2026",
     "diesel":   "0.00",
     "gasoline": "0.00",
     "kerosene": "0.00",
     "dir":      "up",
-    "source":   "fallback"
+    "source":   "waiting for GMA / Inquirer / DOE"
 }
 
 # ── HTTP Session with Retry ───────────────────────────────────────────────
@@ -55,6 +55,24 @@ def next_tuesday_date(now: datetime) -> date:
 
 def next_tuesday_str(now: datetime) -> str:
     return next_tuesday_date(now).strftime("%b %d, %Y")
+
+def is_recent_url(href: str, days: int = 10) -> bool:
+    """Return True if the URL contains a date within the last `days` days."""
+    cutoff = date.today() - timedelta(days=days)
+    # Match date patterns: /2026/03/31/ or /2026-03-31 or 20260331
+    patterns = [
+        r'(\d{4})[/-](\d{2})[/-](\d{2})',
+        r'(\d{4})(\d{2})(\d{2})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, href)
+        if m:
+            try:
+                url_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                return url_date >= cutoff
+            except ValueError:
+                continue
+    return True  # no date in URL, allow through
 
 def get_day_label(now: datetime) -> str:
     """Returns 'Day X (date_range)' for the current monitoring week."""
@@ -163,7 +181,7 @@ def _scrape_gma(result: dict) -> bool:
                         timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.find_all("a", href=True):
-            if "pump-price" in a["href"] and "gmanetwork.com/news" in a["href"]:
+            if "pump-price" in a["href"] and "gmanetwork.com/news" in a["href"] and is_recent_url(a["href"]):
                 r2 = session.get(a["href"], timeout=15, headers={"User-Agent": "Mozilla/5.0"})
                 if _parse_adjustment_from_html(r2.text, result):
                     result["source"] = "GMA News"
@@ -181,7 +199,7 @@ def _scrape_inquirer(result: dict) -> bool:
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if "inquirer.net" in href and re.search(r'fuel|oil|pump|diesel|gasoline', href, re.IGNORECASE):
+            if "inquirer.net" in href and re.search(r'fuel|oil|pump|diesel|gasoline', href, re.IGNORECASE) and is_recent_url(href):
                 r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
                 if _parse_adjustment_from_html(r2.text, result):
                     result["source"] = "Inquirer.net"
@@ -192,13 +210,97 @@ def _scrape_inquirer(result: dict) -> bool:
     return False
 
 
+def _scrape_abscbn(result: dict) -> bool:
+    try:
+        r = session.get("https://news.abs-cbn.com/search?q=pump+price+tuesday",
+                        timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if not href.startswith("http"):
+                href = "https://news.abs-cbn.com" + href
+            if re.search(r'fuel|pump|diesel|gasoline|oil.price', href, re.IGNORECASE) and is_recent_url(href):
+                r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "ABS-CBN News"
+                    print("[INFO] Official adjustment from ABS-CBN News.")
+                    return True
+    except Exception as e:
+        print(f"[WARN] ABS-CBN scrape failed: {e}")
+    return False
+
+
+def _scrape_philstar(result: dict) -> bool:
+    try:
+        r = session.get("https://www.philstar.com/search#q=pump+price+tuesday&sort=date",
+                        timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if not href.startswith("http"):
+                href = "https://www.philstar.com" + href
+            if "philstar.com" in href and re.search(r'fuel|pump|diesel|gasoline|oil.price', href, re.IGNORECASE) and is_recent_url(href):
+                r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "PhilStar"
+                    print("[INFO] Official adjustment from PhilStar.")
+                    return True
+    except Exception as e:
+        print(f"[WARN] PhilStar scrape failed: {e}")
+    return False
+
+
+def _scrape_mb(result: dict) -> bool:
+    try:
+        r = session.get("https://mb.com.ph/?s=pump+price+tuesday",
+                        timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "mb.com.ph" in href and re.search(r'fuel|pump|diesel|gasoline|oil.price', href, re.IGNORECASE) and is_recent_url(href):
+                r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "Manila Bulletin"
+                    print("[INFO] Official adjustment from Manila Bulletin.")
+                    return True
+    except Exception as e:
+        print(f"[WARN] Manila Bulletin scrape failed: {e}")
+    return False
+
+
+def _scrape_news5(result: dict) -> bool:
+    try:
+        r = session.get("https://interaksyon.philstar.com/?s=pump+price+tuesday",
+                        timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "interaksyon" in href and re.search(r'fuel|pump|diesel|gasoline|oil.price', href, re.IGNORECASE) and is_recent_url(href):
+                r2 = session.get(href, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                if _parse_adjustment_from_html(r2.text, result):
+                    result["source"] = "News5"
+                    print("[INFO] Official adjustment from News5.")
+                    return True
+    except Exception as e:
+        print(f"[WARN] News5 scrape failed: {e}")
+    return False
+
+
 def get_official_adjustment() -> dict:
     result = dict(FALLBACK)
     if _scrape_gma(result):
         return result
     if _scrape_inquirer(result):
         return result
-    print("[WARN] Both scrapers failed — using hardcoded fallback.")
+    if _scrape_abscbn(result):
+        return result
+    if _scrape_philstar(result):
+        return result
+    if _scrape_mb(result):
+        return result
+    if _scrape_news5(result):
+        return result
+    print("[WARN] All scrapers failed — using hardcoded fallback.")
     return result
 
 # ── Forecast Calculation ─────────────────────────────────────────────────
