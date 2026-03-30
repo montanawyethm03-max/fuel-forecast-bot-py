@@ -37,6 +37,8 @@ def create_session():
     return session
 
 session = create_session()
+session.verify = False  # bypass corporate SSL proxy
+import urllib3; urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 def get_direction(val: float) -> str:
@@ -409,7 +411,7 @@ def main():
                              usd_php, official, forecast)
 
     print("\n--- MESSAGE PREVIEW ---")
-    print(message)
+    print(message.encode("utf-8", errors="replace").decode("utf-8"))
     print("-----------------------\n")
 
     send_telegram(message)
