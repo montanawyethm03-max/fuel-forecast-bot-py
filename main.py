@@ -56,7 +56,7 @@ def next_tuesday_date(now: datetime) -> date:
 def next_tuesday_str(now: datetime) -> str:
     return next_tuesday_date(now).strftime("%b %d, %Y")
 
-def is_recent_url(href: str, days: int = 10) -> bool:
+def is_recent_url(href: str, days: int = 5) -> bool:
     """Return True if the URL contains a date within the last `days` days."""
     cutoff = date.today() - timedelta(days=days)
     # Match date patterns: /2026/03/31/ or /2026-03-31 or 20260331
