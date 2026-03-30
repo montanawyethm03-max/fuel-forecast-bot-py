@@ -376,7 +376,8 @@ def build_message(now, ho_price, ho_change, rb_price, rb_change,
         f"⛽ Borderline Daily Fuel Forecast\n"
         f"🕓 {now.strftime('%b %d, %Y')} | {now.strftime('%I:%M %p')}\n\n"
         f"{official_section}"
-        f"📢 {day_label} — Next Adjustment ({next_tuesday_str(now)})\n"
+        f"🗓 Next Adjustment: <b>{next_tuesday_str(now)}</b>\n"
+        f"📢 {day_label}\n"
         f"Diesel:   ₱{forecast['d_low']:.1f}-₱{forecast['d_high']:.1f}/L {d_label}\n"
         f"Gasoline: ₱{forecast['g_low']:.1f}-₱{forecast['g_high']:.1f}/L {g_label}\n"
         f"Kerosene: ₱{forecast['k_low']:.1f}-₱{forecast['k_high']:.1f}/L {k_label}\n\n"
@@ -391,7 +392,7 @@ def build_message(now, ho_price, ho_change, rb_price, rb_change,
 # ── Telegram Sender ─────────────────────────────────────────────────────
 def send_telegram(message: str) -> None:
     url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message}
+    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         r = session.post(url, json=data, timeout=30)
         r.raise_for_status()
