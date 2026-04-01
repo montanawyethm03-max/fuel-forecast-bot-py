@@ -284,16 +284,128 @@ def _median(vals):
     return round((s[n // 2 - 1] + s[n // 2]) / 2, 2)
 
 
+def _scrape_direct_sites() -> list[dict]:
+    """
+    Directly scrape known PH fuel news sites that reliably publish
+    weekly fuel price articles. This bypasses Bing RSS which may be
+    blocked in some environments (Docker, GitHub Actions).
+    """
+    articles  = []
+
+    # Manila Bulletin - search page
+    try:
+        r = session.get("https://mb.com.ph/?s=diesel+gasoline+per+liter",
+                        timeout=20, headers=UA)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                title = a.get_text(strip=True)
+                if ("mb.com.ph" in href and title and len(title) > 15
+                        and re.search(r'diesel|gasoline|fuel|pump|kerosene|oil.price', title, re.IGNORECASE)
+                        and is_recent_url(href, days=10)):
+                    articles.append({"title": title, "url": href})
+                    if len(articles) >= 3:
+                        break
+    except Exception as e:
+        print(f"[WARN] MB direct scrape failed: {e}")
+
+    # TopGear PH - reliable weekly fuel price article
+    try:
+        r = session.get("https://www.topgear.com.ph/news/industry-news",
+                        timeout=20, headers=UA)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                title = a.get_text(strip=True)
+                if (title and len(title) > 15
+                        and re.search(r'fuel.price|pump.price|diesel|gasoline', title, re.IGNORECASE)
+                        and is_recent_url(href, days=10)):
+                    if not href.startswith("http"):
+                        href = "https://www.topgear.com.ph" + href
+                    articles.append({"title": title, "url": href})
+                    if len(articles) >= 6:
+                        break
+    except Exception as e:
+        print(f"[WARN] TopGear direct scrape failed: {e}")
+
+    # Rappler energy section
+    try:
+        r = session.get("https://www.rappler.com/business/energy/",
+                        timeout=20, headers=UA)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                title = a.get_text(strip=True)
+                if (title and len(title) > 15
+                        and re.search(r'diesel|gasoline|fuel|pump|kerosene|oil.price', title, re.IGNORECASE)
+                        and is_recent_url(href, days=10)):
+                    if not href.startswith("http"):
+                        href = "https://www.rappler.com" + href
+                    articles.append({"title": title, "url": href})
+                    if len(articles) >= 9:
+                        break
+    except Exception as e:
+        print(f"[WARN] Rappler direct scrape failed: {e}")
+
+    # GMA economy section
+    try:
+        r = session.get("https://www.gmanetwork.com/news/money/economy/",
+                        timeout=20, headers=UA)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                title = a.get_text(strip=True)
+                if (title and len(title) > 15
+                        and re.search(r'diesel|gasoline|fuel|pump|kerosene|oil.price', title, re.IGNORECASE)
+                        and is_recent_url(href, days=10)):
+                    if not href.startswith("http"):
+                        href = "https://www.gmanetwork.com" + href
+                    articles.append({"title": title, "url": href})
+                    if len(articles) >= 12:
+                        break
+    except Exception as e:
+        print(f"[WARN] GMA direct scrape failed: {e}")
+
+    # De-duplicate by URL
+    seen = set()
+    unique = []
+    for a in articles:
+        if a["url"] not in seen:
+            seen.add(a["url"])
+            unique.append(a)
+
+    print(f"[INFO] Direct site scrape found {len(unique)} articles")
+    return unique
+
+
 def scrape_news_consensus(now: datetime) -> dict | None:
     """
-    Scrape news articles via Bing News RSS, extract fuel price adjustments.
-
-    Strategy:
-    - If current monitoring week articles found: use those (direct forecast)
-    - If only last week's articles found: use as baseline, label accordingly
-    - If nothing: return None (caller falls to NYMEX)
+    Scrape news articles for fuel price adjustments using multiple methods:
+    1. Bing News RSS (may be blocked in Docker/CI)
+    2. Direct site scraping (reliable fallback)
+    Then bucket into this-week vs last-week and build consensus.
     """
     this_week, last_week = _discover_articles_bing(now)
+
+    # If Bing returned nothing useful, try direct site scraping
+    if not this_week and not last_week:
+        print("[INFO] Bing RSS empty, trying direct site scraping...")
+        direct = _scrape_direct_sites()
+        if direct:
+            # Bucket by recency
+            for art in direct:
+                # Check URL date to bucket
+                if is_recent_url(art["url"], days=5):
+                    this_week.append(art)
+                else:
+                    last_week.append(art)
+            # If we can't tell from URL dates, put all in this_week
+            if not this_week and direct:
+                this_week = direct
 
     # Try current week articles first
     if this_week:
