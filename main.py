@@ -107,17 +107,28 @@ def _extract_fuel_amounts(text: str) -> dict:
     # Split into sentences for tighter matching
     sentences = re.split(r'[.;]\s+', text)
 
+    # Skip sentences about excise taxes, pump prices (absolute), or policy discussions
+    skip_patterns = re.compile(r'excise\s*tax|hovers?\s*(between|around)|now\s*(at|around)|per\s*liter\s*of\s*(gasoline|diesel|kerosene)', re.IGNORECASE)
+
     for sentence in sentences:
+        if skip_patterns.search(sentence):
+            continue
         for fuel in ('diesel', 'gasoline', 'kerosene'):
             if fuel in sentence.lower() and fuel not in found:
-                # Pattern: fuel_type ... P/peso XX.XX ... per liter
+                # Primary: fuel_type ... P/peso XX.XX ... per liter (strict)
                 m = re.search(
-                    rf'{fuel}\D{{0,80}}?(?:P|₱)\s*([0-9]+(?:\.[0-9]+)?)',
+                    rf'{fuel}\D{{0,80}}?(?:P|₱)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:per\s*liter|/[Ll])',
                     sentence, re.IGNORECASE
                 )
+                if not m:
+                    # Secondary: fuel_type + action verb + amount
+                    m = re.search(
+                        rf'{fuel}\D{{0,40}}?(?:increase|rise|hike|up|rollback|decrease|drop)\D{{0,40}}?(?:P|₱)\s*([0-9]+(?:\.[0-9]+)?)',
+                        sentence, re.IGNORECASE
+                    )
                 if m:
                     val = float(m.group(1))
-                    if 0.10 <= val <= 30.0:  # sanity: pump adjustments are 0.10-30 PHP/L
+                    if 0.10 <= val <= 30.0:
                         found[fuel] = val
 
     # Detect direction per fuel type from surrounding context
@@ -147,12 +158,16 @@ def _extract_date_from_text(text: str) -> str:
 def _discover_articles_bing(now: datetime) -> list[dict]:
     """
     Use Bing News RSS to find the latest PH fuel price articles.
-    Filters to articles published within the current monitoring week only,
-    so we don't accidentally use last week's adjustment as this week's forecast.
+    Buckets articles into 'this_week' (current monitoring week) and
+    'last_week' (previous 7 days before monitoring week started).
     """
+    from email.utils import parsedate_to_datetime
+
     next_tue    = next_tuesday_date(now)
-    mon_start   = next_tue - timedelta(days=8)  # start of monitoring week
-    articles    = []
+    mon_start   = next_tue - timedelta(days=8)   # start of monitoring week
+    cutoff_old  = mon_start - timedelta(days=7)  # 1 week before monitoring
+    this_week   = []
+    last_week   = []
     queries = [
         "Philippines diesel gasoline price increase rollback per liter",
         "Philippines oil price watch fuel price Tuesday",
@@ -178,30 +193,32 @@ def _discover_articles_bing(now: datetime) -> list[dict]:
                 title_text = title.get_text(strip=True)
                 link_url   = link.get_text(strip=True)
 
-                # Only fuel-related articles
                 if not re.search(r'diesel|gasoline|fuel|oil.price|pump.price|kerosene', title_text, re.IGNORECASE):
                     continue
 
-                # Filter by date: must be within current monitoring week
+                pub_date = None
                 if pub:
-                    from email.utils import parsedate_to_datetime
                     try:
                         pub_date = parsedate_to_datetime(pub.get_text(strip=True)).date()
-                        if pub_date < mon_start:
-                            print(f"[SKIP] Too old ({pub_date}): {title_text[:60]}")
-                            continue
                     except Exception:
                         pass
 
                 if link_url in seen_urls:
                     continue
                 seen_urls.add(link_url)
-                articles.append({"title": title_text, "url": link_url})
+
+                entry = {"title": title_text, "url": link_url, "pub_date": pub_date}
+                if pub_date and pub_date >= mon_start:
+                    this_week.append(entry)
+                elif pub_date and pub_date >= cutoff_old:
+                    last_week.append(entry)
+                elif not pub_date:
+                    this_week.append(entry)  # no date, assume current
         except Exception as e:
             print(f"[WARN] Bing RSS query failed: {e}")
 
-    print(f"[INFO] Bing RSS found {len(articles)} current-week fuel articles")
-    return articles
+    print(f"[INFO] Bing RSS: {len(this_week)} this-week, {len(last_week)} last-week articles")
+    return this_week, last_week
 
 
 def _follow_and_parse(url: str) -> dict:
@@ -229,26 +246,15 @@ def _follow_and_parse(url: str) -> dict:
     return {}
 
 
-def scrape_news_consensus(now: datetime) -> dict | None:
-    """
-    Scrape multiple news articles via Bing News RSS, extract fuel price
-    adjustments, and build a consensus (median of all found values).
-    Returns dict like {'diesel': 12.50, 'gasoline': 1.30, 'kerosene': 2.00,
-                       'direction': 'up', 'source': 'News consensus (3 articles)'}
-    or None if no data found.
-    """
-    articles = _discover_articles_bing(now)
-    if not articles:
-        return None
-
+def _scrape_articles(articles: list[dict]) -> dict:
+    """Parse a list of articles, return aggregated fuel amounts."""
     all_diesel = []
     all_gasoline = []
     all_kerosene = []
-    direction = "up"
     source_count = 0
     latest_date = ""
 
-    for art in articles[:8]:  # cap at 8 articles to avoid slowness
+    for art in articles[:8]:
         parsed = _follow_and_parse(art["url"])
         if not parsed:
             continue
@@ -259,39 +265,68 @@ def scrape_news_consensus(now: datetime) -> dict | None:
             all_gasoline.append(parsed['gasoline'])
         if 'kerosene' in parsed:
             all_kerosene.append(parsed['kerosene'])
-        if parsed.get('_direction'):
-            direction = parsed['_direction']
         if parsed.get('_date') and not latest_date:
             latest_date = parsed['_date']
 
-    if not all_diesel and not all_gasoline and not all_kerosene:
-        return None
-
-    def median(vals):
-        if not vals:
-            return 0.0
-        s = sorted(vals)
-        n = len(s)
-        if n % 2 == 1:
-            return s[n // 2]
-        return round((s[n // 2 - 1] + s[n // 2]) / 2, 2)
-
-    result = {
-        "diesel":    median(all_diesel),
-        "gasoline":  median(all_gasoline),
-        "kerosene":  median(all_kerosene),
-        "direction": direction,
-        "source":    f"News consensus ({source_count} articles)",
-        "date":      latest_date or "this week",
-        "raw_diesel":    all_diesel,
-        "raw_gasoline":  all_gasoline,
-        "raw_kerosene":  all_kerosene,
+    return {
+        "diesel": all_diesel, "gasoline": all_gasoline, "kerosene": all_kerosene,
+        "count": source_count, "date": latest_date
     }
 
-    print(f"[INFO] News consensus: diesel={all_diesel} gasoline={all_gasoline} kerosene={all_kerosene}")
-    print(f"[INFO] Median: D=₱{result['diesel']:.2f} G=₱{result['gasoline']:.2f} K=₱{result['kerosene']:.2f} ({direction})")
 
-    return result
+def _median(vals):
+    if not vals:
+        return 0.0
+    s = sorted(vals)
+    n = len(s)
+    if n % 2 == 1:
+        return s[n // 2]
+    return round((s[n // 2 - 1] + s[n // 2]) / 2, 2)
+
+
+def scrape_news_consensus(now: datetime) -> dict | None:
+    """
+    Scrape news articles via Bing News RSS, extract fuel price adjustments.
+
+    Strategy:
+    - If current monitoring week articles found: use those (direct forecast)
+    - If only last week's articles found: use as baseline, label accordingly
+    - If nothing: return None (caller falls to NYMEX)
+    """
+    this_week, last_week = _discover_articles_bing(now)
+
+    # Try current week articles first
+    if this_week:
+        data = _scrape_articles(this_week)
+        if data["diesel"] or data["gasoline"] or data["kerosene"]:
+            result = {
+                "diesel": _median(data["diesel"]),
+                "gasoline": _median(data["gasoline"]),
+                "kerosene": _median(data["kerosene"]),
+                "source": f"News consensus ({data['count']} articles, this week)",
+                "date": data["date"] or "this week",
+            }
+            print(f"[INFO] This-week consensus: D={data['diesel']} G={data['gasoline']} K={data['kerosene']}")
+            print(f"[INFO] Median: D=P{result['diesel']:.2f} G=P{result['gasoline']:.2f} K=P{result['kerosene']:.2f}")
+            return result
+
+    # Fall back to last week's articles as baseline
+    if last_week:
+        data = _scrape_articles(last_week)
+        if data["diesel"] or data["gasoline"] or data["kerosene"]:
+            result = {
+                "diesel": _median(data["diesel"]),
+                "gasoline": _median(data["gasoline"]),
+                "kerosene": _median(data["kerosene"]),
+                "source": f"Last week baseline ({data['count']} articles)",
+                "date": data["date"] or "last week",
+                "_is_baseline": True,
+            }
+            print(f"[INFO] Last-week baseline: D={data['diesel']} G={data['gasoline']} K={data['kerosene']}")
+            print(f"[INFO] Median: D=P{result['diesel']:.2f} G=P{result['gasoline']:.2f} K=P{result['kerosene']:.2f}")
+            return result
+
+    return None
 
 # ── Yahoo Finance NYMEX Fetcher (fallback) ───────────────────────────────
 def _fetch_closes(ticker: str) -> list[tuple[date, float]]:
@@ -414,16 +449,43 @@ def get_official_adjustment() -> dict:
     return result
 
 # ── Forecast Calculation ─────────────────────────────────────────────────
-def calculate_forecast_from_news(consensus: dict) -> dict:
-    """Build forecast from scraped news consensus (primary).
-    Individual values already carry their sign (negative = rollback)."""
+def calculate_forecast_from_news(consensus: dict, nymex_diesel: float = 0,
+                                 nymex_gasoline: float = 0) -> dict:
+    """
+    Build forecast from scraped news data.
+    If consensus is a baseline (last week's data), blend with NYMEX direction:
+      - Use last week's magnitude as the market signal
+      - Adjust with NYMEX week-over-week trend
+      - Widen the range to reflect uncertainty
+    """
     diesel   = consensus["diesel"]
     gasoline = consensus["gasoline"]
     kerosene = consensus["kerosene"]
+    is_baseline = consensus.get("_is_baseline", False)
+
+    if is_baseline and (nymex_diesel or nymex_gasoline):
+        # Blend: last week magnitude + NYMEX directional adjustment
+        # NYMEX tells us if this week is trending higher or lower than last
+        # Apply 50% of the NYMEX delta as a correction factor
+        nymex_factor = 0.5
+        diesel   = round(diesel   + (nymex_diesel   * nymex_factor), 2)
+        gasoline = round(gasoline + (nymex_gasoline  * nymex_factor), 2)
+        kerosene = round(kerosene + (nymex_diesel    * nymex_factor), 2)  # kerosene tracks gasoil
+        print(f"[INFO] Blended: D=P{diesel:.2f} G=P{gasoline:.2f} K=P{kerosene:.2f} (baseline + NYMEX correction)")
 
     d_low, d_high = fuel_range(diesel)
     g_low, g_high = fuel_range(gasoline)
     k_low, k_high = fuel_range(kerosene)
+
+    # Widen range for baseline forecasts (more uncertainty)
+    if is_baseline:
+        extra = 1.0
+        d_low  = max(0.0, round((d_low  - extra) * 2) / 2)
+        d_high = round((d_high + extra) * 2) / 2
+        g_low  = max(0.0, round((g_low  - extra) * 2) / 2)
+        g_high = round((g_high + extra) * 2) / 2
+        k_low  = max(0.0, round((k_low  - extra) * 2) / 2)
+        k_high = round((k_high + extra) * 2) / 2
 
     trend = (
         "Big increase"    if diesel > 6    else
@@ -438,13 +500,15 @@ def calculate_forecast_from_news(consensus: dict) -> dict:
         "No rush - prices stable"             if -1 <= diesel <= 1 else
         "You can wait - rollback expected"
     )
+
+    method = "news_baseline" if is_baseline else "news"
     return {
         "diesel": diesel, "gasoline": gasoline, "kerosene": kerosene,
         "d_low": d_low, "d_high": d_high,
         "g_low": g_low, "g_high": g_high,
         "k_low": k_low, "k_high": k_high,
         "trend": trend, "advice": advice,
-        "method": "news",
+        "method": method,
         "source": consensus["source"],
     }
 
@@ -491,7 +555,9 @@ def calculate_forecast_from_nymex(gasoil_change: float, mogas_change: float,
 def get_confidence(weekday: int, method: str) -> str:
     if method == "news":
         return "High" if weekday >= 4 else "Medium-High" if weekday >= 2 else "Medium"
-    return "Medium" if weekday >= 4 else "Low-Medium" if weekday >= 2 else "Low"
+    if method == "news_baseline":
+        return "Medium" if weekday >= 4 else "Low-Medium" if weekday >= 2 else "Low-Medium"
+    return "Low" if weekday <= 2 else "Low-Medium"
 
 # ── Message Builder ─────────────────────────────────────────────────────
 def build_message(now, ho_price, gasoil_change, rb_price, mogas_change,
@@ -567,10 +633,16 @@ def main():
     ho_latest, gasoil_change, rb_latest, mogas_change, kerosene_change = get_mops_proxies(now)
     usd_php = get_usd_php()
 
+    # Calculate NYMEX-based PHP/L estimates for blending
+    nymex_diesel   = round(gasoil_change * usd_php / LITERS_PER_BARREL, 2)
+    nymex_gasoline = round(mogas_change  * usd_php / LITERS_PER_BARREL, 2)
+
     # Pick forecast method
     if consensus and (consensus.get("diesel") or consensus.get("gasoline")):
-        print("\n[OK] Using NEWS consensus for forecast")
-        forecast = calculate_forecast_from_news(consensus)
+        is_baseline = consensus.get("_is_baseline", False)
+        label = "NEWS BASELINE + NYMEX blend" if is_baseline else "NEWS consensus"
+        print(f"\n[OK] Using {label} for forecast")
+        forecast = calculate_forecast_from_news(consensus, nymex_diesel, nymex_gasoline)
     else:
         print("\n[FALLBACK] No news data, using NYMEX formula")
         forecast = calculate_forecast_from_nymex(gasoil_change, mogas_change, kerosene_change, usd_php)
