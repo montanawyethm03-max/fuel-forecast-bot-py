@@ -672,8 +672,7 @@ def get_confidence(weekday: int, method: str) -> str:
     return "Low" if weekday <= 2 else "Low-Medium"
 
 # ── Message Builder ─────────────────────────────────────────────────────
-def build_message(now, ho_price, gasoil_change, rb_price, mogas_change,
-                  usd_php, official, forecast):
+def build_message(now, usd_php, official, forecast):
     dir_arrow  = "⬆" if official["dir"] == "up" else "⬇"
     method     = forecast.get("method", "nymex")
     confidence = get_confidence(now.weekday(), method)
@@ -692,15 +691,6 @@ def build_message(now, ho_price, gasoil_change, rb_price, mogas_change,
         f"Kerosene: {dir_arrow} P{official['kerosene']}/L\n\n"
     ) if has_official else ""
 
-    source_label = forecast.get("source", "NYMEX")
-
-    nymex_section = ""
-    if ho_price and rb_price:
-        nymex_section = (
-            f"\nGasoil (HO=F): {get_direction(gasoil_change)} ${ho_price:.2f}/bbl ({abs(gasoil_change):.2f} chg)\n"
-            f"Mogas  (RB=F): {get_direction(mogas_change)} ${rb_price:.2f}/bbl ({abs(mogas_change):.2f} chg)\n"
-        )
-
     return (
         f"Borderline Daily Fuel Forecast\n"
         f"{now.strftime('%b %d, %Y')} | {now.strftime('%I:%M %p')}\n\n"
@@ -713,8 +703,6 @@ def build_message(now, ho_price, gasoil_change, rb_price, mogas_change,
         f"Trend: {forecast['trend']}\n"
         f"Confidence: {confidence}\n"
         f"Advice: {forecast['advice']}\n\n"
-        f"Source: {source_label}"
-        f"{nymex_section}"
         f"USD/PHP: {usd_php} | Peso {peso_dir}"
     )
 
@@ -742,7 +730,7 @@ def main():
 
     # Always fetch NYMEX for context
     print("\n--- Fetching NYMEX data ---")
-    ho_latest, gasoil_change, rb_latest, mogas_change, kerosene_change = get_mops_proxies(now)
+    _, gasoil_change, _, mogas_change, kerosene_change = get_mops_proxies(now)
     usd_php = get_usd_php()
 
     # Calculate NYMEX-based PHP/L estimates for blending
@@ -759,8 +747,7 @@ def main():
         print("\n[FALLBACK] No news data, using NYMEX formula")
         forecast = calculate_forecast_from_nymex(gasoil_change, mogas_change, kerosene_change, usd_php)
 
-    message = build_message(now, ho_latest, gasoil_change, rb_latest, mogas_change,
-                            usd_php, official, forecast)
+    message = build_message(now, usd_php, official, forecast)
 
     print("\n--- MESSAGE PREVIEW ---")
     print(message.encode("utf-8", errors="replace").decode("utf-8"))
